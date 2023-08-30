@@ -1,3 +1,7 @@
+# Author: Loki
+# Discord: loki_101
+# Email: loki@crazycoder.dev
+
 import discord
 import random
 import logging
