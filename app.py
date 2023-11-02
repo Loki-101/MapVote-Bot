@@ -1,7 +1,3 @@
-# Author: Loki
-# Discord: loki_101
-# Email: loki@crazycoder.dev
-
 import discord
 import random
 import logging
@@ -18,10 +14,11 @@ in_progress = False
 
 # Define map sets for different game modes
 map_sets = {
-    "Control": ["Busan", "Ilios", "Lijang Tower", "Nepal", "Oasis", "Antarctic Peninsula"],
+    "Control": ["Busan", "Ilios", "Lijang Tower", "Nepal", "Oasis", "Antarctic Peninsula", "Samoa"],
     "Escort": ["Circuit Royal", "Dorado", "Havana", "Junkertown", "Rialto", "Route 66", "Shambali Monastery", "Watchpoint Gibraltar"],
     "Flashpoint": ["New Junk City", "Suravasa"],
     "Hybrid": ["Blizzard World", "Eichenwalde", "Hollywood", "King's Row", "Midtown", "Numbani", "Paraiso"],
+    "Assault": ["Hanamura", "Horizon Lunar Colony", "Paris", "Temple of Anubis", "Volskaya Industries"],
     "Push": ["Colosseo", "Esperanca", "New Queen Street"]
 }
 
@@ -35,14 +32,15 @@ class CategorySelect(discord.ui.View):
 
     # Dropdown menu for category selection
     @discord.ui.select(
-        placeholder="Select exactly 3 categories",
-        min_values=3,
-        max_values=3,
+        placeholder="Select exactly 4 categories",
+        min_values=4,
+        max_values=4,
         options=[
             discord.SelectOption(label="Control"),
             discord.SelectOption(label="Escort"),
             discord.SelectOption(label="Flashpoint"),
             discord.SelectOption(label="Hybrid"),
+            discord.SelectOption(label="Assault"),
             discord.SelectOption(label="Push")
         ]
     )
@@ -124,7 +122,7 @@ async def map_vote(ctx, captain1: discord.User, captain2: discord.User):
 
         # Create dropdown for Team Captain 1
         view1 = CategorySelect(captain1.id, ctx)
-        await ctx.respond(f"{captain1.mention}, please select 3 categories.", view=view1)
+        await ctx.respond(f"{captain1.mention}, please select 4 categories.", view=view1)
         await view1.wait()
 
         # Team Captain 1's selection
@@ -133,7 +131,7 @@ async def map_vote(ctx, captain1: discord.User, captain2: discord.User):
 
         # Create dropdown for Team Captain 2
         view2 = CategorySelect(captain2.id, ctx)
-        await ctx.send(f"{captain2.mention}, please select 3 categories.", view=view2)
+        await ctx.send(f"{captain2.mention}, please select 4 categories.", view=view2)
         await view2.wait()
 
         # Team Captain 2's selection
@@ -203,7 +201,7 @@ async def mapvote(ctx,
     captain1: discord.Option(discord.SlashCommandOptionType.user, description="Team Captain 1"),
     captain2: discord.Option(discord.SlashCommandOptionType.user, description="Team Captain 2")):
 
-    required_role_id = CHANGE_ME # Staff role ID goes here, or @everyone role ID to disable
+    required_role_id = 458833002643062804
     member = ctx.guild.get_member(ctx.author.id)
 
     # Check if the user has the required role
@@ -218,5 +216,5 @@ async def mapvote(ctx,
         logging.error(f"Exception in mapvote: {e}")
         await ctx.send("An error occurred. Please try again.")
 
-# Run the bot
+# Run the bot - your Discord Bot's token goes here
 bot.run("CHANGE_ME")
