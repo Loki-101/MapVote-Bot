@@ -1,5 +1,7 @@
 # MapVote-Bot
 To answer the unspoken question, yes; I suck at naming things. You are now stuck with "MapVote-Bot". No, this is not just for Overwatch Tournaments. You should be able to change the sets to anything. I made this as readable as possible so you can adapt it to your use cases.
+Permissions needed: Bot - Send Messages & Read Message History
+If you get "interaction failed" you likely didn't give the bot permissions to send and view messages in the channel you're using it in.
 
 ![image](https://github.com/Loki-101/MapVote-Bot/assets/59907407/8b117fee-1cce-41c1-9eac-e3e2a15a0379)
 
