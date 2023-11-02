@@ -3,6 +3,8 @@ To answer the unspoken question, yes; I suck at naming things. You are now stuck
 Permissions needed: Bot - Send Messages & Read Message History
 If you get "interaction failed" you likely didn't give the bot permissions to send and view messages in the channel you're using it in.
 
+### The screenshots below are no longer up to date - Assault Mode and the Samoa map have since been added. The minimum amount of modes to choose is now 4 rather than 3.
+
 ![image](https://github.com/Loki-101/MapVote-Bot/assets/59907407/8b117fee-1cce-41c1-9eac-e3e2a15a0379)
 
 ![image](https://github.com/Loki-101/MapVote-Bot/assets/59907407/622cf0ea-f051-4bd4-9df8-920c851b6b0d)
