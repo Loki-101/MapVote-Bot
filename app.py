@@ -19,7 +19,8 @@ map_sets = {
     "Flashpoint": ["New Junk City", "Suravasa"],
     "Hybrid": ["Blizzard World", "Eichenwalde", "Hollywood", "King's Row", "Midtown", "Numbani", "Paraiso"],
     "Assault": ["Hanamura", "Horizon Lunar Colony", "Paris", "Temple of Anubis", "Volskaya Industries"],
-    "Push": ["Colosseo", "Esperanca", "New Queen Street"]
+    "Push": ["Colosseo", "Esperanca", "New Queen Street", "Runasapi"],
+    "Clash": ["Hanaoka", "Throne of Anubis"]
 }
 
 # Custom class to handle category selection
@@ -35,14 +36,7 @@ class CategorySelect(discord.ui.View):
         placeholder="Select exactly 4 categories",
         min_values=4,
         max_values=4,
-        options=[
-            discord.SelectOption(label="Control"),
-            discord.SelectOption(label="Escort"),
-            discord.SelectOption(label="Flashpoint"),
-            discord.SelectOption(label="Hybrid"),
-            discord.SelectOption(label="Assault"),
-            discord.SelectOption(label="Push")
-        ]
+        options=[discord.SelectOption(label=category) for category in map_sets.keys()]
     )
     async def select_callback(self, select, interaction):
         try:
