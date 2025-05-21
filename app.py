@@ -50,7 +50,7 @@ class CategorySelect(discord.ui.View):
 
             # Provide feedback and stop the view
             await interaction.message.delete()
-            await self.ctx.send(f"User {interaction.user.mention} selected {', '.join(self.selected_categories)}.")
+            await self.ctx.send(f"{interaction.user.mention} selected a map category.")
             self.stop()
         except Exception as e:
             logging.debug(f"Exception in CategorySelect: {e}")
