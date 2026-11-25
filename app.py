@@ -124,7 +124,7 @@ class VoteSession(discord.ui.DesignerView):
         self.host = host
         self.captains = captains
         self.expires_at = int(time.time()) + SESSION_TIMEOUT
-        self.picks: dict[int, set[str]] = {}
+        self.picks: dict[int, list[str]] = {}
         self.category: str | None = None
         self.pool: list[str] = []
         self.bans: list[str] = []
@@ -188,7 +188,7 @@ class VoteSession(discord.ui.DesignerView):
         if self.category is None:
             select = discord.ui.Select(
                 custom_id=f"{self.id}:categories",
-                placeholder=f"Select {CATEGORY_PICKS} categories",
+                placeholder=f"Select {CATEGORY_PICKS} categories by order of preference",
                 min_values=CATEGORY_PICKS,
                 max_values=CATEGORY_PICKS,
                 options=[discord.SelectOption(label=category) for category in MAPS],
@@ -226,7 +226,7 @@ class VoteSession(discord.ui.DesignerView):
         if interaction.user.id in self.picks:
             return await reject(interaction, "You've already selected your categories.")
 
-        self.picks[interaction.user.id] = set(select.values)
+        self.picks[interaction.user.id] = list(select.values)
         if len(self.picks) == len(self.captains):
             self.draw_pool()
         await self.update(interaction)
@@ -257,7 +257,11 @@ class VoteSession(discord.ui.DesignerView):
         await self.update(interaction)
 
     def draw_pool(self):
-        self.category = random.choice(sorted(set.intersection(*self.picks.values())))
+        # Earlier picks are worth more: first = CATEGORY_PICKS points, last = 1
+        overlap = set.intersection(*map(set, self.picks.values()))
+        scores = {c: sum(CATEGORY_PICKS - picks.index(c) for picks in self.picks.values()) for c in overlap}
+        best = max(scores.values())
+        self.category = random.choice(sorted(c for c, s in scores.items() if s == best))
         maps = available_maps(self.guild_id, self.category)
         self.pool = random.sample(maps, min(len(maps), MAP_POOL_SIZE))
         self.total_bans = (len(self.pool) - 1) // len(self.captains) * len(self.captains)
