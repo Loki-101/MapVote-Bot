@@ -1,214 +1,347 @@
-import discord
-import random
+import asyncio
 import logging
-import functools
+import os
+import random
+import secrets
+import time
+from collections import defaultdict
+from contextlib import suppress
+from functools import partial
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+import discord
+from dotenv import load_dotenv
 
-# Create a Discord bot instance
-bot = discord.Bot()
+# Config
 
-# Flag to track if a map vote is in progress
-in_progress = False
+MAP_POOL_SIZE = 3
+# Hours before a chosen map can be drawn again in the same server, 0 disables
+NO_REPEAT_PERIOD = 24
+# Discord interaction tokens expire after 15 minutes, keep this below 900
+SESSION_TIMEOUT = 600 # Seconds
 
-# Define map sets for different game modes
-map_sets = {
-    "Control": ["Busan", "Ilios", "Lijang Tower", "Nepal", "Oasis", "Antarctic Peninsula", "Samoa"],
-    "Escort": ["Circuit Royal", "Dorado", "Havana", "Junkertown", "Rialto", "Route 66", "Shambali Monastery", "Watchpoint Gibraltar"],
-    "Flashpoint": ["New Junk City", "Suravasa"],
-    "Hybrid": ["Blizzard World", "Eichenwalde", "Hollywood", "King's Row", "Midtown", "Numbani", "Paraiso"],
-    "Assault": ["Hanamura", "Horizon Lunar Colony", "Paris", "Temple of Anubis", "Volskaya Industries"],
-    "Push": ["Colosseo", "Esperanca", "New Queen Street", "Runasapi"],
-    "Clash": ["Hanaoka", "Throne of Anubis"]
+# Map pool
+
+MAP_POOL = {
+    "Assault": (
+        "Hanamura[Original, Winter]",
+        "Horizon Lunar Colony",
+        "Paris",
+        "Temple of Anubis",
+        "Volskaya Industries",
+    ),
+    # "Clash": (
+    #     "Hanaoka",
+    #     "Throne of Anubis",
+    # ),
+    "Control": (
+        "Antarctic Peninsula",
+        "Busan",
+        "Ilios[Evening, Morning, Night]",
+        "Lijiang Tower[Morning, Dawn, Night]",
+        "Nepal[Evening, Morning]",
+        "Oasis[Evening, Morning, Night]",
+        "Samoa",
+    ),
+    "Escort": (
+        "Circuit Royal[Morning, Night]",
+        "Dorado[Evening, Night]",
+        "Havana[Morning, Night]",
+        "Junkertown[Morning, Night]",
+        "Rialto[Sunrise, Morning, Evening]",
+        "Route 66[Morning, Overcast, Night]",
+        "Shambali Monastery[Morning, Night]",
+        "Watchpoint: Gibraltar[Morning, Evening]",
+        "Watchpoint: Grímsvötn",
+    ),
+    # "Flashpoint": (
+    #     "Aatlis",
+    #     "New Junk City",
+    #     "Suravasa",
+    # ),
+    "Hybrid": (
+        "Blizzard World[Morning, Overcast, Night, Winter]",
+        "Eichenwalde[Morning, Evening]",
+        "Hollywood[Morning, Night, Sunset]",
+        "King's Row[Overcast, Night, Evening, Winter]",
+        "Midtown[Morning, Night]",
+        "Neon Junction[Morning, Night]",
+        "Numbani",
+        "Paraíso",
+    ),
+    # "Push": (
+    #     "Colosseo[Evening, Night, Morning]",
+    #     "Esperança[Night, Morning]",
+    #     "New Queen Street[Dawn, Morning]",
+    #     "Runasapi",
+    # ),
 }
 
-# Custom class to handle category selection
-class CategorySelect(discord.ui.View):
-    def __init__(self, user_id, ctx):
-        super().__init__()
-        self.user_id = user_id
-        self.ctx = ctx
-        self.selected_categories = []
 
-    # Dropdown menu for category selection
-    @discord.ui.select(
-        placeholder="Select exactly 4 categories",
-        min_values=4,
-        max_values=4,
-        options=[discord.SelectOption(label=category) for category in map_sets.keys()]
-    )
-    async def select_callback(self, select, interaction):
-        try:
-            # Check user authorization
-            if interaction.user.id != self.user_id:
-                await interaction.response.send_message("You're not authorized to interact with this menu.", ephemeral=True)
-                return
+def parse_map(entry: str) -> tuple[str, tuple[str, ...]]:
+    name, _, variants = entry.strip().removesuffix("]").partition("[")
+    return name.strip(), tuple(v.strip() for v in variants.split(",") if v.strip())
 
-            # Store selected categories
-            self.selected_categories = select.values
 
-            # Provide feedback and stop the view
-            await interaction.message.delete()
-            await self.ctx.send(f"{interaction.user.mention} selected a map category.")
-            self.stop()
-        except Exception as e:
-            logging.debug(f"Exception in CategorySelect: {e}")
+MAPS = {category: dict(map(parse_map, entries)) for category, entries in MAP_POOL.items()}
 
-# Custom class to handle map selection
-class MapSelect(discord.ui.View):
-    def __init__(self, user_id, ctx, maps):
-        super().__init__()
-        self.user_id = user_id
-        self.ctx = ctx
-        self.maps = maps
-        self.selected_map = None
+CATEGORY_PICKS = len(MAPS) // 2 + 1
 
-        # Create buttons for each map
-        for map_name in self.maps:
-            button = discord.ui.Button(label=map_name, style=discord.ButtonStyle.green, custom_id=map_name)
-            button.callback = functools.partial(self.button_callback, button)
-            self.add_item(button)
+# Map history
 
-    # Callback for map selection button
-    async def button_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        try:
-            # Check user authorization
-            if interaction.user.id != self.user_id:
-                await interaction.response.send_message("You're not authorized to interact with this menu.", ephemeral=True)
-                return
+recent_maps: defaultdict[tuple[int, str], dict[str, float]] = defaultdict(dict)
 
-            # Update button appearance and disable it
-            self.selected_map = button.label
-            button.style = discord.ButtonStyle.danger
-            button.disabled = True
 
-            # Edit the message to show the selected map and stop the view
-            await interaction.response.edit_message(
-                content=f"{interaction.user.mention} banned the map {self.selected_map}.",
-                view=self
+def available_maps(guild_id: int, category: str) -> list[str]:
+    maps = list(MAPS[category])
+    if not NO_REPEAT_PERIOD:
+        return maps
+
+    history = recent_maps[guild_id, category]
+    cutoff = time.monotonic() - NO_REPEAT_PERIOD * 3600
+    fresh = [m for m in maps if m not in history or history[m] < cutoff]
+    if len(fresh) < min(len(maps), MAP_POOL_SIZE):
+        history.clear()
+        return maps
+    return fresh
+
+
+def remember_map(guild_id: int, category: str, map_name: str):
+    if NO_REPEAT_PERIOD:
+        recent_maps[guild_id, category][map_name] = time.monotonic()
+
+
+def random_note(options: list[str]) -> str:
+    return f"\n-# Selected at random from {', '.join(options)}." if len(options) > 1 else ""
+
+
+# Vote session
+
+class VoteSession(discord.ui.DesignerView):
+    def __init__(self, guild_id: int, host: discord.Member, captains: tuple[discord.Member, discord.Member]):
+        super().__init__(timeout=None)
+        self.id = secrets.token_hex(4)
+        self.guild_id = guild_id
+        self.host = host
+        self.captains = captains
+        self.expires_at = int(time.time()) + SESSION_TIMEOUT
+        self.picks: dict[int, set[str]] = {}
+        self.category: str | None = None
+        self.pool: list[str] = []
+        self.bans: list[str] = []
+        self.total_bans = 0
+        self.final_map: str | None = None
+        self.variant_votes: dict[int, str] = {}
+        self.outcome: str | None = None
+        self.render()
+
+    @property
+    def variants(self) -> tuple[str, ...]:
+        return MAPS[self.category][self.final_map] if self.final_map else ()
+
+    @property
+    def banning_captain(self) -> discord.Member:
+        return self.captains[len(self.bans) % len(self.captains)]
+
+    def render(self):
+        self.clear_items()
+        container = discord.ui.Container(
+            discord.ui.TextDisplay(f"## Map Vote\n{self.captains[0].mention} vs {self.captains[1].mention}"),
+            discord.ui.Separator(),
+            discord.ui.TextDisplay(self.status_text()),
+        )
+        if self.outcome is None:
+            for row in self.controls():
+                container.add_item(row)
+            container.add_item(discord.ui.Separator())
+            cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id=f"{self.id}:cancel")
+            cancel.callback = self.cancel
+            container.add_item(discord.ui.ActionRow(cancel))
+            container.add_item(discord.ui.TextDisplay(f"-# Expires <t:{self.expires_at}:R>"))
+        self.add_item(container)
+
+    def status_text(self) -> str:
+        if self.category is None:
+            lines = [
+                f"{c.mention} selected their categories." if c.id in self.picks
+                else f"Waiting on {c.mention} to select {CATEGORY_PICKS} categories."
+                for c in self.captains
+            ]
+        else:
+            lines = [f"The map category will be ``{self.category}``!"]
+            lines += [f"{self.captains[i % len(self.captains)].mention} banned the map ``{m}``." for i, m in enumerate(self.bans)]
+            if self.final_map is None:
+                if self.outcome is None:
+                    lines.append(f"{self.banning_captain.mention}, please ban one map.")
+            elif self.variants:
+                lines.append(f"The map will be ``{self.final_map}``!{random_note(self.pool)}")
+                if self.outcome is None:
+                    lines += [
+                        f"{c.mention} voted for a variant." if c.id in self.variant_votes
+                        else f"Waiting on {c.mention} to vote for a variant."
+                        for c in self.captains
+                    ]
+        if self.outcome:
+            lines.append(self.outcome)
+        return "\n".join(lines)
+
+    def controls(self) -> list[discord.ui.ActionRow]:
+        if self.category is None:
+            select = discord.ui.Select(
+                custom_id=f"{self.id}:categories",
+                placeholder=f"Select {CATEGORY_PICKS} categories",
+                min_values=CATEGORY_PICKS,
+                max_values=CATEGORY_PICKS,
+                options=[discord.SelectOption(label=category) for category in MAPS],
             )
-            self.stop()
-        except Exception as e:
-            logging.debug(f"Exception in MapSelect: {e}")
+            select.callback = partial(self.pick_categories, select)
+            return [discord.ui.ActionRow(select)]
 
-    # Set the available maps dynamically
-    def set_maps(self, maps):
-        logging.info(f"Setting maps: {maps}")
-        self.select.options = [discord.SelectOption(label=map_name) for map_name in maps]
-        logging.info(f"Set select.options: {self.select.options}")
+        if self.final_map is not None:
+            buttons = []
+            for variant in self.variants:
+                button = discord.ui.Button(label=variant, style=discord.ButtonStyle.primary, custom_id=f"{self.id}:variant:{variant}")
+                button.callback = partial(self.vote_variant, variant)
+                buttons.append(button)
+            return [discord.ui.ActionRow(*buttons[i:i + 5]) for i in range(0, len(buttons), 5)]
 
-# Function to conduct a map vote
-async def map_vote(ctx, captain1: discord.User, captain2: discord.User):
-    try:
-        global in_progress
-        logging.info(f"Initial in_progress: {in_progress}")
+        buttons = []
+        for map_name in self.pool:
+            button = discord.ui.Button(label=map_name, style=discord.ButtonStyle.success, custom_id=f"{self.id}:ban:{map_name}")
+            button.callback = partial(self.ban, map_name)
+            buttons.append(button)
+        return [discord.ui.ActionRow(*buttons[i:i + 5]) for i in range(0, len(buttons), 5)]
 
-        # Check if a map vote is already in progress
-        if in_progress:
-            logging.warning("Map vote already in progress.")
-            await ctx.send("A map vote is already in progress.")
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.outcome is not None:
+            await reject(interaction, "This map vote has already ended.")
+            return False
+        if interaction.user.id not in {self.host.id, *(c.id for c in self.captains)}:
+            await reject(interaction, "You're not authorized to interact with this menu.")
+            return False
+        return True
+
+    async def pick_categories(self, select: discord.ui.Select, interaction: discord.Interaction):
+        if interaction.user.id not in {c.id for c in self.captains}:
+            return await reject(interaction, "Only the team captains can select categories.")
+        if interaction.user.id in self.picks:
+            return await reject(interaction, "You've already selected your categories.")
+
+        self.picks[interaction.user.id] = set(select.values)
+        if len(self.picks) == len(self.captains):
+            self.draw_pool()
+        await self.update(interaction)
+
+    async def ban(self, map_name: str, interaction: discord.Interaction):
+        if interaction.user.id != self.banning_captain.id:
+            return await reject(interaction, f"It's {self.banning_captain.mention}'s turn to ban.")
+        if self.final_map is not None or map_name not in self.pool:
+            return await reject(interaction, f"``{map_name}`` can't be banned anymore.")
+
+        self.bans.append(map_name)
+        self.pool.remove(map_name)
+        if len(self.bans) == self.total_bans:
+            self.pick_final()
+        await self.update(interaction)
+
+    async def vote_variant(self, variant: str, interaction: discord.Interaction):
+        if interaction.user.id not in {c.id for c in self.captains}:
+            return await reject(interaction, "Only the team captains can vote for a variant.")
+        if interaction.user.id in self.variant_votes:
+            return await reject(interaction, "You've already voted for a variant.")
+
+        self.variant_votes[interaction.user.id] = variant
+        if len(self.variant_votes) == len(self.captains):
+            votes = list(self.variant_votes.values())
+            remember_map(self.guild_id, self.category, self.final_map)
+            self.finish(f"### The variant will be: ``{random.choice(votes)}``{random_note(list(dict.fromkeys(votes)))}")
+        await self.update(interaction)
+
+    def draw_pool(self):
+        self.category = random.choice(sorted(set.intersection(*self.picks.values())))
+        maps = available_maps(self.guild_id, self.category)
+        self.pool = random.sample(maps, min(len(maps), MAP_POOL_SIZE))
+        self.total_bans = (len(self.pool) - 1) // len(self.captains) * len(self.captains)
+        if self.total_bans == 0:
+            self.pick_final()
+
+    def pick_final(self):
+        self.final_map = random.choice(self.pool)
+        if not self.variants:
+            remember_map(self.guild_id, self.category, self.final_map)
+            self.finish(f"### The map will be: ``{self.final_map}``{random_note(self.pool)}")
+
+    async def cancel(self, interaction: discord.Interaction):
+        if interaction.user.id != self.host.id:
+            return await reject(interaction, f"Only {self.host.mention} can cancel this map vote.")
+
+        self.finish(f"Map vote cancelled by {self.host.mention}.")
+        await self.update(interaction)
+
+    async def end(self, outcome: str):
+        if self.outcome is not None:
             return
+        self.finish(outcome)
+        self.render()
+        if self.message:
+            with suppress(discord.HTTPException):
+                await self.message.edit(view=self)
 
-        # Start a new map vote
-        logging.info("Starting map vote...")
-        in_progress = True
+    def finish(self, outcome: str):
+        self.outcome = outcome
+        self.stop()
 
-        # Create dropdown for Team Captain 1
-        view1 = CategorySelect(captain1.id, ctx)
-        await ctx.respond(f"{captain1.mention}, please select 4 categories.", view=view1)
-        await view1.wait()
+    async def update(self, interaction: discord.Interaction):
+        self.render()
+        await interaction.response.edit_message(view=self)
 
-        # Team Captain 1's selection
-        categories1 = view1.selected_categories
-        logging.info(f"Categories1: {categories1}")
 
-        # Create dropdown for Team Captain 2
-        view2 = CategorySelect(captain2.id, ctx)
-        await ctx.send(f"{captain2.mention}, please select 4 categories.", view=view2)
-        await view2.wait()
+async def reject(interaction: discord.Interaction, message: str):
+    await interaction.response.send_message(message, ephemeral=True)
 
-        # Team Captain 2's selection
-        categories2 = view2.selected_categories
-        logging.info(f"Categories2: {categories2}")
 
-        # Find overlapping category
-        overlapping_categories = list(set(categories1) & set(categories2))
-        logging.info(f"Overlapping categories: {overlapping_categories}")
-        selected_category = random.choice(overlapping_categories)
-        logging.info(f"Selected category: {selected_category}")
-        await ctx.send(f"The map category will be ``{selected_category}``!")
+# Bot
 
-        # Determine number of maps in the selected category
-        num_maps = len(map_sets[selected_category])
-        logging.info(f"Number of maps in selected category: {num_maps}")
+class MapVoteBot(discord.Bot):
+    async def close(self):
+        for session in list(sessions.values()):
+            await session.end("Map vote stopped because the bot went offline.")
+        await super().close()
 
-        # Skip bans if only 1 or 2 maps are available
-        if num_maps <= 2:
-            in_progress = False  # Reset the flag here
-            logging.info(f"Skipping bans, in_progress set to {in_progress}")
-            if num_maps == 2:
-                await ctx.send("Skipping map bans and selecting a map at random as there are only 2 maps.")
-                final_map = random.choice(map_sets[selected_category])
-            else:  # num_maps == 1
-                await ctx.send("Skipping map bans as there is only 1 map.")
-                final_map = map_sets[selected_category][0]
-            await ctx.send(f"The map will be: {final_map}")
-            return
 
-        # Create buttons for Team Captain 1 to ban
-        maps = random.sample(map_sets[selected_category], 3)
-        logging.info(f"Sampled maps for banning: {maps}")
-        view3 = MapSelect(captain1.id, ctx, maps)
-        await ctx.send(f"{captain1.mention}, please ban one map.", view=view3)
-        await view3.wait()
+bot = MapVoteBot()
+sessions: dict[str, VoteSession] = {}
 
-        # Team Captain 1's ban
-        banned_map1 = view3.selected_map
-        logging.info(f"Banned map1: {banned_map1}")
-        maps.remove(banned_map1)
 
-        # Create buttons for Team Captain 2 to ban
-        view4 = MapSelect(captain2.id, ctx, maps)  # Changed this line
-        await ctx.send(f"{captain2.mention}, please ban one map.", view=view4)
-        await view4.wait()
+@bot.slash_command(
+    description="Starts a map vote between two team captains.",
+    contexts={discord.InteractionContextType.guild},
+)
+@discord.option("captain1", description="Team Captain 1")
+@discord.option("captain2", description="Team Captain 2")
+async def mapvote(ctx: discord.ApplicationContext, captain1: discord.Member, captain2: discord.Member):
+    captains = (captain1, captain2)
+    if captain1 == captain2:
+        return await ctx.respond("The two team captains must be different people.", ephemeral=True)
+    if any(captain.bot for captain in captains):
+        return await ctx.respond("Bots can't be team captains.", ephemeral=True)
+    if any(captain in session.captains for session in sessions.values() for captain in captains):
+        return await ctx.respond("One of those team captains is already in a map vote.", ephemeral=True)
 
-        # Team Captain 2's ban
-        banned_map2 = view4.selected_map
-        logging.info(f"Banned map2: {banned_map2}")
-        maps.remove(banned_map2)
-
-        # Output the final result
-        final_map = maps[0]
-        logging.info(f"Final map: {final_map}")
-        await ctx.send(f"The map will be: ``{final_map}``")
-        logging.info("Map vote completed.")
-        in_progress = False
-    except Exception as e:
-        logging.error(f"Exception in map_vote: {e}")
-        await ctx.send("An error occurred. Please try again.")
-        in_progress = False
-
-# Command to start a map vote
-@bot.command(description="Starts a map vote between two team captains.")
-async def mapvote(ctx,
-    captain1: discord.Option(discord.SlashCommandOptionType.user, description="Team Captain 1"),
-    captain2: discord.Option(discord.SlashCommandOptionType.user, description="Team Captain 2")):
-
-    required_role_id = 458833002643062804
-    member = ctx.guild.get_member(ctx.author.id)
-
-    # Check if the user has the required role
-    if required_role_id not in [role.id for role in member.roles]:
-        required_role = ctx.guild.get_role(required_role_id)
-        await ctx.respond(f"You need the {required_role.name} role to use this command.", ephemeral=True)
-        return
-
+    session = VoteSession(ctx.guild_id, ctx.author, captains)
+    sessions[session.id] = session
     try:
-        await map_vote(ctx, captain1, captain2)
-    except Exception as e:
-        logging.error(f"Exception in mapvote: {e}")
-        await ctx.send("An error occurred. Please try again.")
+        await ctx.respond(view=session)
+        await asyncio.wait_for(session.wait(), SESSION_TIMEOUT)
+    except TimeoutError:
+        await session.end("Map vote timed out.")
+    finally:
+        sessions.pop(session.id, None)
 
-# Run the bot - your Discord Bot's token goes here
-bot.run("CHANGE_ME")
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    load_dotenv()
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        raise SystemExit("DISCORD_TOKEN is not set in the environment or a .env file.")
+    bot.run(token)
